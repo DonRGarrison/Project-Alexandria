@@ -29,7 +29,7 @@ Each click-through records a row in `/var/log/kiwix-portal/access_log.csv`:
 
 ## Prerequisites
 
-- Raspberry Pi 5 running PiOS Bookworm
+- Raspberry Pi 5 running Debian 13 (Trixie)
 - WiFi AP configured via NetworkManager on `10.42.0.1`
 - Kiwix server running on port `8080`
 
@@ -41,11 +41,12 @@ sudo bash setup_captive_portal.sh
 ```
 
 The setup script will:
-- Install dependencies (`iptables-persistent`, `dnsmasq`, `python3`)
+- Install dependencies (`nftables`, `dnsmasq`, `python3`)
 - Install the portal server to `/opt/kiwix-portal/`
 - Create a systemd service (`kiwix-portal`)
-- Configure iptables to redirect HTTP/HTTPS to the portal
+- Configure nftables to redirect HTTP/HTTPS to the portal
 - Configure dnsmasq to resolve all DNS to `10.42.0.1`
+- Handle systemd-resolved conflicts automatically
 
 ## Usage
 
@@ -58,6 +59,9 @@ sudo journalctl -u kiwix-portal -f
 
 # View access log
 cat /var/log/kiwix-portal/access_log.csv
+
+# View firewall rules
+sudo nft list table ip captive_portal
 
 # Restart
 sudo systemctl restart kiwix-portal

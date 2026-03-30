@@ -1,5 +1,5 @@
 #!/bin/bash
-# Uninstall the Kiwix Captive Portal
+# Uninstall the Kiwix Captive Portal (Debian Trixie / nftables)
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -7,25 +7,23 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-AP_INTERFACE="wlan0"
-PORTAL_IP="10.42.0.1"
-
 echo "Stopping and disabling captive portal..."
 systemctl stop kiwix-portal.service 2>/dev/null || true
 systemctl disable kiwix-portal.service 2>/dev/null || true
 rm -f /etc/systemd/system/kiwix-portal.service
 systemctl daemon-reload
 
-echo "Removing iptables rules..."
-iptables -t nat -D PREROUTING -i "$AP_INTERFACE" -p tcp --dport 80 \
-    ! -d "$PORTAL_IP" -j DNAT --to-destination "${PORTAL_IP}:80" 2>/dev/null || true
-iptables -t nat -D PREROUTING -i "$AP_INTERFACE" -p tcp --dport 443 \
-    ! -d "$PORTAL_IP" -j DNAT --to-destination "${PORTAL_IP}:80" 2>/dev/null || true
-netfilter-persistent save 2>/dev/null || true
+echo "Removing nftables rules..."
+nft delete table ip captive_portal 2>/dev/null || true
+rm -f /etc/nftables.d/captive-portal.conf
 
 echo "Removing dnsmasq config..."
 rm -f /etc/dnsmasq.d/captive-portal.conf
 systemctl restart dnsmasq 2>/dev/null || true
+
+echo "Removing systemd-resolved override..."
+rm -f /etc/systemd/resolved.conf.d/captive-portal.conf
+systemctl restart systemd-resolved 2>/dev/null || true
 
 echo "Removing portal files..."
 rm -rf /opt/kiwix-portal

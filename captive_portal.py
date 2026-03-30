@@ -101,16 +101,21 @@ WELCOME_PAGE = """<!DOCTYPE html>
         </p>
         <button class="enter-btn" id="enterBtn" onclick="enterLibrary()">Enter Library</button>
         <div class="spinner" id="spinner"></div>
+        <p id="statusMsg" class="footer" style="display:none;">Opening in your browser...</p>
         <p class="footer">Powered by Kiwix on ApachePi</p>
         <p class="geo-note">Location data may be collected for usage analytics.</p>
     </div>
 
     <script>
+    var KIWIX = '""" + KIWIX_URL + """';
+
     function enterLibrary() {
         var btn = document.getElementById('enterBtn');
         var spinner = document.getElementById('spinner');
+        var statusMsg = document.getElementById('statusMsg');
         btn.style.display = 'none';
         spinner.style.display = 'block';
+        statusMsg.style.display = 'block';
 
         var info = {
             userAgent: navigator.userAgent,
@@ -124,21 +129,38 @@ WELCOME_PAGE = """<!DOCTYPE html>
             geo_accuracy: ''
         };
 
-        function sendAndRedirect() {
+        function sendAndOpenBrowser() {
             var xhr = new XMLHttpRequest();
             xhr.open('POST', 'http://10.42.0.1/log_access', true);
             xhr.setRequestHeader('Content-Type', 'application/json');
-            var redirected = false;
-            function doRedirect() {
-                if (!redirected) {
-                    redirected = true;
-                    window.location.href = '""" + KIWIX_URL + """';
+            var opened = false;
+            function doOpen() {
+                if (!opened) {
+                    opened = true;
+                    // Tell the server to return "success" to the OS captive
+                    // portal checker. This causes the popup to auto-dismiss.
+                    // We fetch /dismiss in the background while opening the
+                    // real browser via an <a> tag click or window.open.
+                    fetch('http://10.42.0.1/dismiss').catch(function(){});
+
+                    // Create a temporary link with target=_blank to force
+                    // the system's default browser to open (not the captive
+                    // portal mini-browser).
+                    var a = document.createElement('a');
+                    a.href = KIWIX;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    document.body.appendChild(a);
+                    a.click();
+
+                    // Update status in case the popup hasn't closed yet
+                    statusMsg.textContent = 'Check your browser! You can close this window.';
                 }
             }
-            xhr.onload = function() { doRedirect(); };
-            xhr.onerror = function() { doRedirect(); };
-            // Fallback redirect after 4 seconds in case logging hangs
-            setTimeout(doRedirect, 4000);
+            xhr.onload = function() { doOpen(); };
+            xhr.onerror = function() { doOpen(); };
+            // Fallback after 4 seconds in case logging hangs
+            setTimeout(doOpen, 4000);
             xhr.send(JSON.stringify(info));
         }
 
@@ -148,16 +170,16 @@ WELCOME_PAGE = """<!DOCTYPE html>
                     info.geo_lat = pos.coords.latitude;
                     info.geo_lon = pos.coords.longitude;
                     info.geo_accuracy = pos.coords.accuracy;
-                    sendAndRedirect();
+                    sendAndOpenBrowser();
                 },
                 function(err) {
                     // Geolocation denied or unavailable - proceed without it
-                    sendAndRedirect();
+                    sendAndOpenBrowser();
                 },
                 { timeout: 5000, maximumAge: 300000 }
             );
         } else {
-            sendAndRedirect();
+            sendAndOpenBrowser();
         }
     }
     </script>
@@ -265,7 +287,40 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_GET(self):
-        # Serve the welcome page for ALL GET requests.
+        path = urllib.parse.urlparse(self.path).path
+
+        # After the user clicks "Enter Library", the JS calls /dismiss
+        # which returns the expected captive portal "success" responses.
+        # This tells the OS "internet is working" and closes the popup,
+        # while the real browser opens with the Kiwix URL.
+        if path == "/dismiss":
+            ua = self.headers.get("User-Agent", "").lower()
+            if "cros" in ua or "android" in ua:
+                # Android/Chrome: expects 204 No Content
+                self.send_response(204)
+                self.end_headers()
+            elif "iphone" in ua or "ipad" in ua or "mac" in ua or "darwin" in ua:
+                # Apple: expects this exact HTML with "Success" in title
+                body = b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif "windows" in ua:
+                # Windows: expects "Microsoft Connect Test"
+                body = b"Microsoft Connect Test"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(204)
+                self.end_headers()
+            return
+
+        # Serve the welcome page for ALL other GET requests.
         # This ensures captive portal detection probes (Apple, Android,
         # Windows, Firefox) all receive our page instead of the expected
         # "success" response, which triggers the captive portal popup.

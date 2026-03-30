@@ -8,6 +8,8 @@ import http.server
 import json
 import os
 import csv
+import sys
+import subprocess
 import urllib.parse
 from datetime import datetime
 
@@ -124,15 +126,19 @@ WELCOME_PAGE = """<!DOCTYPE html>
 
         function sendAndRedirect() {
             var xhr = new XMLHttpRequest();
-            xhr.open('POST', '/log_access', true);
+            xhr.open('POST', 'http://10.42.0.1/log_access', true);
             xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4) {
+            var redirected = false;
+            function doRedirect() {
+                if (!redirected) {
+                    redirected = true;
                     window.location.href = '""" + KIWIX_URL + """';
                 }
-            };
-            // Fallback redirect after 3 seconds in case logging fails
-            setTimeout(function() { window.location.href = '""" + KIWIX_URL + """'; }, 3000);
+            }
+            xhr.onload = function() { doRedirect(); };
+            xhr.onerror = function() { doRedirect(); };
+            // Fallback redirect after 4 seconds in case logging hangs
+            setTimeout(doRedirect, 4000);
             xhr.send(JSON.stringify(info));
         }
 
@@ -159,26 +165,10 @@ WELCOME_PAGE = """<!DOCTYPE html>
 </html>
 """
 
-# Standard captive portal detection responses
-CAPTIVE_PORTAL_PATHS = {
-    # Apple
-    "/hotspot-detect.html": "<!--opted-in--><html><body>Success</body></html>",
-    "/library/test/success.html": "Success",
-    # Android / Google
-    "/generate_204": "",
-    "/gen_204": "",
-    "/connecttest.txt": "Microsoft Connect Test",
-    # Windows
-    "/ncsi.txt": "Microsoft NCSI",
-    "/redirect": "",
-    # Firefox
-    "/canonical.html": '<html><body>success</body></html>',
-    "/success.txt": "success\n",
-}
-
 
 def get_mac_from_ip(ip_addr):
     """Look up MAC address from the ARP table for a given IP."""
+    # Try /proc/net/arp first
     try:
         with open("/proc/net/arp", "r") as f:
             for line in f:
@@ -187,9 +177,23 @@ def get_mac_from_ip(ip_addr):
                     mac = parts[3]
                     if mac != "00:00:00:00:00:00":
                         return mac
-        return "unknown"
     except Exception:
-        return "unknown"
+        pass
+    # Fallback: use ip neigh command
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show", ip_addr],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split()
+            if "lladdr" in parts:
+                idx = parts.index("lladdr")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+    except Exception:
+        pass
+    return "unknown"
 
 
 def parse_os_from_ua(ua):
@@ -242,29 +246,45 @@ def ensure_log_file():
                 "screen_resolution", "geo_latitude", "geo_longitude",
                 "geo_accuracy_m"
             ])
+        print(f"Created log file: {LOG_FILE}", flush=True)
 
 
 class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        """Suppress default request logging to keep journal clean."""
-        pass
+        """Log requests to stdout so they appear in journalctl."""
+        print(f"[{self.client_address[0]}] {format % args}", flush=True)
+
+    def _serve_welcome_page(self):
+        """Serve the welcome/splash page."""
+        page = WELCOME_PAGE.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(page)
 
     def do_GET(self):
-        path = urllib.parse.urlparse(self.path).path
+        # Serve the welcome page for ALL GET requests.
+        # This ensures captive portal detection probes (Apple, Android,
+        # Windows, Firefox) all receive our page instead of the expected
+        # "success" response, which triggers the captive portal popup.
+        self._serve_welcome_page()
 
-        # Captive portal detection probes - redirect to welcome page
-        if path in CAPTIVE_PORTAL_PATHS:
-            self.send_response(302)
-            self.send_header("Location", "http://10.42.0.1/")
-            self.end_headers()
-            return
-
-        # Serve welcome page for everything else
+    def do_HEAD(self):
+        # Some captive portal detectors use HEAD requests
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
-        self.wfile.write(WELCOME_PAGE.encode("utf-8"))
+
+    def do_OPTIONS(self):
+        # Handle CORS preflight for the POST from the welcome page
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def do_POST(self):
         if self.path == "/log_access":
@@ -281,31 +301,39 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
                 now = datetime.now()
                 screen = f"{data.get('screenWidth', '?')}x{data.get('screenHeight', '?')}"
 
+                row = [
+                    now.strftime("%Y-%m-%d"),
+                    now.strftime("%H:%M:%S"),
+                    client_ip,
+                    mac,
+                    os_name,
+                    device_name,
+                    ua,
+                    data.get("platform", ""),
+                    data.get("language", ""),
+                    screen,
+                    data.get("geo_lat", ""),
+                    data.get("geo_lon", ""),
+                    data.get("geo_accuracy", ""),
+                ]
+
                 ensure_log_file()
                 with open(LOG_FILE, "a", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow([
-                        now.strftime("%Y-%m-%d"),
-                        now.strftime("%H:%M:%S"),
-                        client_ip,
-                        mac,
-                        os_name,
-                        device_name,
-                        ua,
-                        data.get("platform", ""),
-                        data.get("language", ""),
-                        screen,
-                        data.get("geo_lat", ""),
-                        data.get("geo_lon", ""),
-                        data.get("geo_accuracy", ""),
-                    ])
+                    writer.writerow(row)
+
+                print(f"LOGGED: {client_ip} | {mac} | {os_name} | {device_name}", flush=True)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(b'{"status":"ok"}')
+
             except Exception as e:
+                print(f"ERROR logging access: {e}", file=sys.stderr, flush=True)
                 self.send_response(500)
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(str(e).encode())
         else:
@@ -314,10 +342,22 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    print(f"=== Kiwix Captive Portal ===", flush=True)
+    print(f"Listening on 0.0.0.0:{PORT}", flush=True)
+    print(f"Log file: {LOG_FILE}", flush=True)
+
     ensure_log_file()
+
+    # Verify log is writable
+    try:
+        with open(LOG_FILE, "a") as f:
+            pass
+        print(f"Log file is writable: OK", flush=True)
+    except Exception as e:
+        print(f"WARNING: Cannot write to log file: {e}", file=sys.stderr, flush=True)
+
     server = http.server.HTTPServer(("0.0.0.0", PORT), CaptivePortalHandler)
-    print(f"Captive portal running on 0.0.0.0:{PORT}")
-    print(f"Logging to {LOG_FILE}")
+    print(f"Server started. Waiting for connections...", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

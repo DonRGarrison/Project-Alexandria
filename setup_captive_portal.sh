@@ -104,7 +104,7 @@ mkdir -p /etc/nftables.d
 # Write captive portal nftables rules
 cat > "$NFT_CONF" <<EOF
 # Kiwix Captive Portal - nftables NAT rules
-# Redirect HTTP/HTTPS from WiFi clients to the captive portal
+# Redirect HTTP/HTTPS/DNS from WiFi clients to the captive portal
 
 table ip captive_portal {
     chain prerouting {
@@ -117,6 +117,11 @@ table ip captive_portal {
         # Redirect HTTPS (port 443) to the portal as well
         # (triggers captive portal detection on most devices)
         iifname "${AP_INTERFACE}" ip daddr != ${PORTAL_IP} tcp dport 443 dnat to ${PORTAL_IP}:${PORTAL_PORT}
+
+        # Redirect any DNS queries to the Pi's own DNS (NM dnsmasq)
+        # Catches devices using custom/hardcoded DNS (e.g. 8.8.8.8)
+        iifname "${AP_INTERFACE}" ip daddr != ${PORTAL_IP} udp dport 53 dnat to ${PORTAL_IP}:53
+        iifname "${AP_INTERFACE}" ip daddr != ${PORTAL_IP} tcp dport 53 dnat to ${PORTAL_IP}:53
     }
 }
 EOF
@@ -164,16 +169,25 @@ if systemctl is-enabled dnsmasq.service 2>/dev/null | grep -q enabled; then
     systemctl disable dnsmasq.service 2>/dev/null || true
 fi
 
-# Restart NetworkManager to pick up the new dnsmasq config
+# Restart NetworkManager to pick up the new dnsmasq config.
+# Bring the hotspot down and back up so NM re-launches dnsmasq with our config.
 echo "  Restarting NetworkManager to apply DNS config..."
-systemctl restart NetworkManager
-
-# Wait briefly for NM to re-establish the hotspot and dnsmasq
-sleep 3
+HOTSPOT_CONN=$(nmcli -t -f NAME,TYPE connection show --active | grep ':802-11-wireless' | head -1 | cut -d: -f1)
+if [[ -n "$HOTSPOT_CONN" ]]; then
+    echo "  Cycling hotspot connection '${HOTSPOT_CONN}'..."
+    nmcli connection down "$HOTSPOT_CONN" 2>/dev/null || true
+    sleep 2
+    nmcli connection up "$HOTSPOT_CONN" 2>/dev/null || true
+    sleep 3
+else
+    echo "  No active hotspot found, restarting NetworkManager..."
+    systemctl restart NetworkManager
+    sleep 5
+fi
 
 # --- Start the portal ---
 echo "[6/6] Starting captive portal..."
-systemctl start kiwix-portal.service
+systemctl restart kiwix-portal.service
 
 echo ""
 echo "========================================"
@@ -183,6 +197,64 @@ echo ""
 echo "  Captive portal: http://${PORTAL_IP}"
 echo "  Kiwix library:  http://${PORTAL_IP}:${KIWIX_PORT}"
 echo "  Access log:     ${LOG_DIR}/access_log.csv"
+echo ""
+
+# --- Verification ---
+echo "  Verifying..."
+ERRORS=0
+
+# Check portal service
+if systemctl is-active --quiet kiwix-portal.service; then
+    echo "  [OK] kiwix-portal service is running"
+else
+    echo "  [!!] kiwix-portal service is NOT running"
+    ERRORS=$((ERRORS+1))
+fi
+
+# Check port 80 is listening
+if ss -tlnp | grep -q ':80 '; then
+    echo "  [OK] Port 80 is listening"
+else
+    echo "  [!!] Port 80 is NOT listening"
+    ERRORS=$((ERRORS+1))
+fi
+
+# Check nftables rules are loaded
+if nft list table ip captive_portal &>/dev/null; then
+    echo "  [OK] nftables captive_portal rules loaded"
+else
+    echo "  [!!] nftables captive_portal rules NOT loaded"
+    ERRORS=$((ERRORS+1))
+fi
+
+# Check NM dnsmasq is running with our config
+DNSMASQ_PID=$(ss -tlnup | grep ':53 ' | grep -oP 'pid=\K[0-9]+' | head -1)
+if [[ -n "$DNSMASQ_PID" ]]; then
+    echo "  [OK] DNS server running (pid ${DNSMASQ_PID}) on port 53"
+    # Check if dnsmasq has our address=/#/ config
+    if cat /proc/${DNSMASQ_PID}/cmdline 2>/dev/null | tr '\0' ' ' | grep -q 'dnsmasq-shared'; then
+        echo "  [OK] dnsmasq is NM-managed (shared mode)"
+    fi
+else
+    echo "  [!!] No DNS server on port 53"
+    ERRORS=$((ERRORS+1))
+fi
+
+# Check log file
+if [[ -f "${LOG_DIR}/access_log.csv" ]]; then
+    echo "  [OK] Log file exists: ${LOG_DIR}/access_log.csv"
+else
+    echo "  [!!] Log file missing"
+    ERRORS=$((ERRORS+1))
+fi
+
+echo ""
+if [[ $ERRORS -eq 0 ]]; then
+    echo "  All checks passed!"
+else
+    echo "  ${ERRORS} check(s) failed. Run: sudo journalctl -u kiwix-portal -f"
+fi
+
 echo ""
 echo "  Useful commands:"
 echo "    sudo systemctl status kiwix-portal    # Check portal status"

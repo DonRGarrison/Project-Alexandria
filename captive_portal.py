@@ -2,6 +2,13 @@
 """
 Kiwix Captive Portal Server
 Serves a welcome page on port 80 and logs device info when users click through to Kiwix.
+
+Flow:
+  1. Device connects → OS captive portal probe gets our welcome page → popup appears
+  2. User taps "Enter Library" → JS POSTs device info to /log_access
+  3. JS then loads /dismiss which returns OS-specific "success" → popup closes
+  4. User opens their real browser → any URL hits our server (DNS hijacked) →
+     server sees their IP was already authenticated → 302 redirect to Kiwix
 """
 
 import http.server
@@ -11,12 +18,29 @@ import csv
 import sys
 import subprocess
 import urllib.parse
+import threading
+import time
 from datetime import datetime
 
 KIWIX_URL = "http://10.42.0.1:8080"
 LOG_DIR = "/var/log/kiwix-portal"
 LOG_FILE = os.path.join(LOG_DIR, "access_log.csv")
 PORT = 80
+
+# Track IPs that have clicked "Enter Library" so when they open their
+# real browser we redirect them straight to Kiwix instead of showing
+# the welcome page again. Entries expire after 24 hours.
+authenticated_ips = {}  # ip -> timestamp
+AUTH_EXPIRY_SECONDS = 86400  # 24 hours
+
+
+def cleanup_expired_ips():
+    """Remove expired IPs from the authenticated set."""
+    now = time.time()
+    expired = [ip for ip, ts in authenticated_ips.items() if now - ts > AUTH_EXPIRY_SECONDS]
+    for ip in expired:
+        del authenticated_ips[ip]
+
 
 WELCOME_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -84,6 +108,17 @@ WELCOME_PAGE = """<!DOCTYPE html>
             animation: spin 0.8s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .done-msg {
+            display: none;
+            margin-top: 1.5rem;
+            padding: 1rem;
+            background: rgba(255,255,255,0.1);
+            border-radius: 8px;
+            line-height: 1.6;
+        }
+        .done-msg strong {
+            font-size: 1.1rem;
+        }
         .geo-note {
             font-size: 0.75rem;
             opacity: 0.5;
@@ -97,25 +132,26 @@ WELCOME_PAGE = """<!DOCTYPE html>
         <h1>Welcome to ApachePi Library</h1>
         <p class="subtitle">
             You are connected to a local knowledge server powered by Kiwix on ApachePi.<br>
-            Tap the button below to browse the library.
+            Tap the button below to get started.
         </p>
         <button class="enter-btn" id="enterBtn" onclick="enterLibrary()">Enter Library</button>
         <div class="spinner" id="spinner"></div>
-        <p id="statusMsg" class="footer" style="display:none;">Opening in your browser...</p>
+        <div class="done-msg" id="doneMsg">
+            <strong>You're connected!</strong><br>
+            Close this popup, then open your browser.<br>
+            The library will load automatically.
+        </div>
         <p class="footer">Powered by Kiwix on ApachePi</p>
         <p class="geo-note">Location data may be collected for usage analytics.</p>
     </div>
 
     <script>
-    var KIWIX = '""" + KIWIX_URL + """';
-
     function enterLibrary() {
         var btn = document.getElementById('enterBtn');
         var spinner = document.getElementById('spinner');
-        var statusMsg = document.getElementById('statusMsg');
+        var doneMsg = document.getElementById('doneMsg');
         btn.style.display = 'none';
         spinner.style.display = 'block';
-        statusMsg.style.display = 'block';
 
         var info = {
             userAgent: navigator.userAgent,
@@ -129,38 +165,21 @@ WELCOME_PAGE = """<!DOCTYPE html>
             geo_accuracy: ''
         };
 
-        function sendAndOpenBrowser() {
+        function sendLog() {
             var xhr = new XMLHttpRequest();
             xhr.open('POST', 'http://10.42.0.1/log_access', true);
             xhr.setRequestHeader('Content-Type', 'application/json');
-            var opened = false;
-            function doOpen() {
-                if (!opened) {
-                    opened = true;
-                    // Tell the server to return "success" to the OS captive
-                    // portal checker. This causes the popup to auto-dismiss.
-                    // We fetch /dismiss in the background while opening the
-                    // real browser via an <a> tag click or window.open.
-                    fetch('http://10.42.0.1/dismiss').catch(function(){});
-
-                    // Create a temporary link with target=_blank to force
-                    // the system's default browser to open (not the captive
-                    // portal mini-browser).
-                    var a = document.createElement('a');
-                    a.href = KIWIX;
-                    a.target = '_blank';
-                    a.rel = 'noopener noreferrer';
-                    document.body.appendChild(a);
-                    a.click();
-
-                    // Update status in case the popup hasn't closed yet
-                    statusMsg.textContent = 'Check your browser! You can close this window.';
+            var done = false;
+            function onDone() {
+                if (!done) {
+                    done = true;
+                    spinner.style.display = 'none';
+                    doneMsg.style.display = 'block';
                 }
             }
-            xhr.onload = function() { doOpen(); };
-            xhr.onerror = function() { doOpen(); };
-            // Fallback after 4 seconds in case logging hangs
-            setTimeout(doOpen, 4000);
+            xhr.onload = function() { onDone(); };
+            xhr.onerror = function() { onDone(); };
+            setTimeout(onDone, 4000);
             xhr.send(JSON.stringify(info));
         }
 
@@ -170,16 +189,15 @@ WELCOME_PAGE = """<!DOCTYPE html>
                     info.geo_lat = pos.coords.latitude;
                     info.geo_lon = pos.coords.longitude;
                     info.geo_accuracy = pos.coords.accuracy;
-                    sendAndOpenBrowser();
+                    sendLog();
                 },
                 function(err) {
-                    // Geolocation denied or unavailable - proceed without it
-                    sendAndOpenBrowser();
+                    sendLog();
                 },
                 { timeout: 5000, maximumAge: 300000 }
             );
         } else {
-            sendAndOpenBrowser();
+            sendLog();
         }
     }
     </script>
@@ -190,7 +208,6 @@ WELCOME_PAGE = """<!DOCTYPE html>
 
 def get_mac_from_ip(ip_addr):
     """Look up MAC address from the ARP table for a given IP."""
-    # Try /proc/net/arp first
     try:
         with open("/proc/net/arp", "r") as f:
             for line in f:
@@ -201,7 +218,6 @@ def get_mac_from_ip(ip_addr):
                         return mac
     except Exception:
         pass
-    # Fallback: use ip neigh command
     try:
         result = subprocess.run(
             ["ip", "neigh", "show", ip_addr],
@@ -238,9 +254,7 @@ def parse_os_from_ua(ua):
 
 def parse_device_name(ua):
     """Try to extract a device model from the User-Agent string."""
-    # Android devices often include model info
     if "Android" in ua:
-        # Pattern: Android X.X; <device model> Build/
         try:
             start = ua.index(";", ua.index("Android")) + 1
             end = ua.index("Build/", start) if "Build/" in ua[start:] else ua.index(")", start)
@@ -286,55 +300,42 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(page)
 
+    def _redirect_to_kiwix(self):
+        """Send a 302 redirect to the Kiwix server."""
+        self.send_response(302)
+        self.send_header("Location", KIWIX_URL)
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+
     def do_GET(self):
+        client_ip = self.client_address[0]
         path = urllib.parse.urlparse(self.path).path
 
-        # After the user clicks "Enter Library", the JS calls /dismiss
-        # which returns the expected captive portal "success" responses.
-        # This tells the OS "internet is working" and closes the popup,
-        # while the real browser opens with the Kiwix URL.
-        if path == "/dismiss":
-            ua = self.headers.get("User-Agent", "").lower()
-            if "cros" in ua or "android" in ua:
-                # Android/Chrome: expects 204 No Content
-                self.send_response(204)
-                self.end_headers()
-            elif "iphone" in ua or "ipad" in ua or "mac" in ua or "darwin" in ua:
-                # Apple: expects this exact HTML with "Success" in title
-                body = b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            elif "windows" in ua:
-                # Windows: expects "Microsoft Connect Test"
-                body = b"Microsoft Connect Test"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            else:
-                self.send_response(204)
-                self.end_headers()
+        # Periodic cleanup of expired authenticated IPs
+        cleanup_expired_ips()
+
+        # If this IP already clicked "Enter Library", redirect them
+        # straight to Kiwix. This is the key: when the user opens
+        # their real browser after the captive portal popup closes,
+        # any URL they visit lands here (DNS is hijacked) and we
+        # send them to Kiwix immediately.
+        if client_ip in authenticated_ips:
+            print(f"[{client_ip}] Authenticated - redirecting to Kiwix", flush=True)
+            self._redirect_to_kiwix()
             return
 
-        # Serve the welcome page for ALL other GET requests.
-        # This ensures captive portal detection probes (Apple, Android,
-        # Windows, Firefox) all receive our page instead of the expected
-        # "success" response, which triggers the captive portal popup.
+        # Not yet authenticated - show the welcome page.
+        # This also handles captive portal detection probes:
+        # the OS sees a non-standard response and shows the popup.
         self._serve_welcome_page()
 
     def do_HEAD(self):
-        # Some captive portal detectors use HEAD requests
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
 
     def do_OPTIONS(self):
-        # Handle CORS preflight for the POST from the welcome page
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -377,6 +378,9 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
                     writer = csv.writer(f)
                     writer.writerow(row)
 
+                # Mark this IP as authenticated so their real browser
+                # gets redirected to Kiwix
+                authenticated_ips[client_ip] = time.time()
                 print(f"LOGGED: {client_ip} | {mac} | {os_name} | {device_name}", flush=True)
 
                 self.send_response(200)
@@ -403,7 +407,6 @@ def main():
 
     ensure_log_file()
 
-    # Verify log is writable
     try:
         with open(LOG_FILE, "a") as f:
             pass

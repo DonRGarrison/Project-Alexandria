@@ -21,7 +21,7 @@ WELCOME_PAGE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome - Offline Library</title>
+    <title>Welcome - ApachePi Library</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -92,14 +92,14 @@ WELCOME_PAGE = """<!DOCTYPE html>
 <body>
     <div class="container">
         <div class="logo">&#128218;</div>
-        <h1>Welcome to the Offline Library</h1>
+        <h1>Welcome to ApachePi Library</h1>
         <p class="subtitle">
-            You are connected to a local knowledge server powered by Kiwix.<br>
+            You are connected to a local knowledge server powered by Kiwix on ApachePi.<br>
             Tap the button below to browse the library.
         </p>
         <button class="enter-btn" id="enterBtn" onclick="enterLibrary()">Enter Library</button>
         <div class="spinner" id="spinner"></div>
-        <p class="footer">Powered by Kiwix on Raspberry Pi</p>
+        <p class="footer">Powered by Kiwix on ApachePi</p>
         <p class="geo-note">Location data may be collected for usage analytics.</p>
     </div>
 

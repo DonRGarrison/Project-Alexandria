@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-# Kiwix Captive Portal - Setup Script for Raspberry Pi 5
-# Debian GNU/Linux 13 (Trixie)
+# Kiwix Captive Portal - Setup Script for ApachePi
+# Raspberry Pi 5 / Debian GNU/Linux 13 (Trixie)
 # ============================================================
 # This script:
 #   1. Installs the captive portal Python server as a systemd service
@@ -12,9 +12,10 @@
 #   5. Makes everything persistent across reboots
 #
 # Prerequisites:
-#   - Raspberry Pi 5 running Debian 13 (Trixie)
+#   - ApachePi: Raspberry Pi 5 running Debian 13 (Trixie)
 #   - WiFi AP already configured via NetworkManager on 10.42.0.1
 #   - Kiwix server running on 10.42.0.1:8080
+#   - Run as: sudo bash setup_captive_portal.sh (from apachepi user)
 #
 # Usage:  sudo bash setup_captive_portal.sh
 # ============================================================

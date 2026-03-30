@@ -1,6 +1,6 @@
-# Kiwix Captive Portal for Raspberry Pi 5
+# Kiwix Captive Portal for ApachePi
 
-A captive portal that greets users connecting to your Kiwix WiFi access point with a welcome page, then logs device information when they click through to the library.
+A captive portal that greets users connecting to ApachePi's Kiwix WiFi access point with a welcome page, then logs device information when they click through to the library.
 
 ## What It Does
 
@@ -29,14 +29,18 @@ Each click-through records a row in `/var/log/kiwix-portal/access_log.csv`:
 
 ## Prerequisites
 
-- Raspberry Pi 5 running Debian 13 (Trixie)
+- Raspberry Pi 5 (ApachePi) running Debian 13 (Trixie)
 - WiFi AP configured via NetworkManager on `10.42.0.1`
-- Kiwix server running on port `8080`
+- Kiwix server running on `10.42.0.1:8080`
+- User: `apachepi`
 
 ## Installation
 
+On your Pi as `apachepi@ApachePi`:
+
 ```bash
-git clone <this-repo> && cd <this-repo>
+cd ~
+git clone <this-repo> Project-Alexandria && cd Project-Alexandria
 sudo bash setup_captive_portal.sh
 ```
 

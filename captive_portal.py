@@ -111,7 +111,7 @@ WELCOME_PAGE = """<!DOCTYPE html>
         .done-msg {
             display: none;
             margin-top: 1.5rem;
-            padding: 1rem;
+            padding: 1.5rem;
             background: rgba(255,255,255,0.1);
             border-radius: 8px;
             line-height: 1.6;
@@ -119,6 +119,34 @@ WELCOME_PAGE = """<!DOCTYPE html>
         .done-msg strong {
             font-size: 1.1rem;
         }
+        .url-box {
+            display: inline-block;
+            margin: 0.8rem 0;
+            padding: 0.7rem 1.2rem;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 1.1rem;
+            letter-spacing: 0.5px;
+            user-select: all;
+            -webkit-user-select: all;
+            cursor: text;
+            word-break: break-all;
+        }
+        .copy-btn {
+            display: inline-block;
+            margin-top: 0.5rem;
+            padding: 0.5rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #fff;
+            background: #2a7d4f;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .copy-btn:active { background: #1e5c3a; }
         .geo-note {
             font-size: 0.75rem;
             opacity: 0.5;
@@ -137,15 +165,46 @@ WELCOME_PAGE = """<!DOCTYPE html>
         <button class="enter-btn" id="enterBtn" onclick="enterLibrary()">Enter Library</button>
         <div class="spinner" id="spinner"></div>
         <div class="done-msg" id="doneMsg">
-            <strong>You're connected!</strong><br>
-            Close this popup, then open your browser.<br>
-            The library will load automatically.
+            <strong>You're connected!</strong><br><br>
+            Open your browser and go to:<br>
+            <span class="url-box" id="urlBox">10.42.0.1:8080</span><br>
+            <button class="copy-btn" onclick="copyUrl()">Copy Link</button>
+            <p id="copyStatus" style="font-size:0.85rem; margin-top:0.3rem; opacity:0.7;"></p>
         </div>
         <p class="footer">Powered by Kiwix on ApachePi</p>
         <p class="geo-note">Location data may be collected for usage analytics.</p>
     </div>
 
     <script>
+    function copyUrl() {
+        var url = 'http://10.42.0.1:8080';
+        var status = document.getElementById('copyStatus');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(function() {
+                status.textContent = 'Copied!';
+            }).catch(function() {
+                fallbackCopy(url, status);
+            });
+        } else {
+            fallbackCopy(url, status);
+        }
+    }
+    function fallbackCopy(text, status) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            status.textContent = 'Copied!';
+        } catch(e) {
+            status.textContent = 'Long-press the link above to copy';
+        }
+        document.body.removeChild(ta);
+    }
+
     function enterLibrary() {
         var btn = document.getElementById('enterBtn');
         var spinner = document.getElementById('spinner');

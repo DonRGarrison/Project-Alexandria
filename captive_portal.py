@@ -285,6 +285,33 @@ def ensure_log_file():
         print(f"Created log file: {LOG_FILE}", flush=True)
 
 
+# OS captive portal probe paths. When an authenticated device's OS
+# sends these probes, we must return the expected "success" response
+# so the OS marks the network as "connected" and stops showing the
+# captive portal. If we redirect these, the OS thinks the portal is
+# still active and falls back to cellular data.
+PROBE_PATHS = {
+    # Apple (CNA)
+    "/hotspot-detect.html",
+    "/library/test/success.html",
+    # Android / Google
+    "/generate_204",
+    "/gen_204",
+    # Windows (NCSI)
+    "/connecttest.txt",
+    "/ncsi.txt",
+    "/redirect",
+    # Firefox
+    "/canonical.html",
+    "/success.txt",
+    # Samsung
+    "/generate204",
+    # Other common
+    "/check_network_status.txt",
+    "/connectivity-check.html",
+}
+
+
 class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Log requests to stdout so they appear in journalctl."""
@@ -307,26 +334,59 @@ class CaptivePortalHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
 
+    def _serve_probe_success(self, path):
+        """Return the expected 'success' response for OS captive portal probes.
+        This tells the OS the network is working so it stops showing the popup."""
+        if path in ("/generate_204", "/gen_204", "/generate204"):
+            self.send_response(204)
+            self.end_headers()
+        elif path == "/hotspot-detect.html" or path == "/library/test/success.html":
+            body = b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/connecttest.txt", "/ncsi.txt"):
+            body = b"Microsoft Connect Test"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/canonical.html", "/success.txt"):
+            body = b"success\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(204)
+            self.end_headers()
+
     def do_GET(self):
         client_ip = self.client_address[0]
         path = urllib.parse.urlparse(self.path).path
 
-        # Periodic cleanup of expired authenticated IPs
         cleanup_expired_ips()
 
-        # If this IP already clicked "Enter Library", redirect them
-        # straight to Kiwix. This is the key: when the user opens
-        # their real browser after the captive portal popup closes,
-        # any URL they visit lands here (DNS is hijacked) and we
-        # send them to Kiwix immediately.
+        is_probe = path in PROBE_PATHS
+
         if client_ip in authenticated_ips:
-            print(f"[{client_ip}] Authenticated - redirecting to Kiwix", flush=True)
-            self._redirect_to_kiwix()
+            if is_probe:
+                # OS is checking connectivity. Return "success" so it
+                # marks WiFi as connected and stops the captive portal.
+                print(f"[{client_ip}] Probe {path} - returning success (authenticated)", flush=True)
+                self._serve_probe_success(path)
+            else:
+                # Real browser request - redirect to Kiwix
+                print(f"[{client_ip}] Browser request - redirecting to Kiwix", flush=True)
+                self._redirect_to_kiwix()
             return
 
-        # Not yet authenticated - show the welcome page.
-        # This also handles captive portal detection probes:
-        # the OS sees a non-standard response and shows the popup.
+        # Not yet authenticated - show the welcome page for everything.
+        # OS probes get our page instead of "success", triggering the popup.
         self._serve_welcome_page()
 
     def do_HEAD(self):

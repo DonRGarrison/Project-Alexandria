@@ -17,13 +17,9 @@ echo "Removing nftables rules..."
 nft delete table ip captive_portal 2>/dev/null || true
 rm -f /etc/nftables.d/captive-portal.conf
 
-echo "Removing dnsmasq config..."
-rm -f /etc/dnsmasq.d/captive-portal.conf
-systemctl restart dnsmasq 2>/dev/null || true
-
-echo "Removing systemd-resolved override..."
-rm -f /etc/systemd/resolved.conf.d/captive-portal.conf
-systemctl restart systemd-resolved 2>/dev/null || true
+echo "Removing NetworkManager dnsmasq DNS hijack config..."
+rm -f /etc/NetworkManager/dnsmasq-shared.d/captive-portal.conf
+systemctl restart NetworkManager 2>/dev/null || true
 
 echo "Removing portal files..."
 rm -rf /opt/kiwix-portal

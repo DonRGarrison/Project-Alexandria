@@ -7,9 +7,9 @@
 #   1. Installs the captive portal Python server as a systemd service
 #   2. Configures nftables to redirect all HTTP (port 80) and HTTPS
 #      (port 443) traffic from connected clients to the portal
-#   3. Sets up dnsmasq overrides so captive-portal detection works
-#   4. Disables systemd-resolved on the AP interface to avoid conflicts
-#   5. Makes everything persistent across reboots
+#   3. Configures NetworkManager's built-in dnsmasq to hijack DNS
+#      (resolves all domains to the portal IP for captive portal detection)
+#   4. Makes everything persistent across reboots
 #
 # Prerequisites:
 #   - ApachePi: Raspberry Pi 5 running Debian 13 (Trixie)
@@ -61,19 +61,19 @@ if ! ip link show "$AP_INTERFACE" &>/dev/null; then
 fi
 
 # --- Install dependencies ---
-echo "[1/7] Installing dependencies..."
+echo "[1/6] Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq nftables dnsmasq python3 > /dev/null
+apt-get install -y -qq nftables python3 > /dev/null
 
 # --- Install portal files ---
-echo "[2/7] Installing captive portal server..."
+echo "[2/6] Installing captive portal server..."
 mkdir -p "$INSTALL_DIR"
 cp "${SCRIPT_DIR}/captive_portal.py" "${INSTALL_DIR}/captive_portal.py"
 chmod +x "${INSTALL_DIR}/captive_portal.py"
 mkdir -p "$LOG_DIR"
 
 # --- Create systemd service ---
-echo "[3/7] Creating systemd service..."
+echo "[3/6] Creating systemd service..."
 cat > /etc/systemd/system/kiwix-portal.service <<EOF
 [Unit]
 Description=Kiwix Captive Portal
@@ -96,7 +96,7 @@ systemctl daemon-reload
 systemctl enable kiwix-portal.service
 
 # --- Configure nftables ---
-echo "[4/7] Configuring nftables redirect rules..."
+echo "[4/6] Configuring nftables redirect rules..."
 
 # Create nftables drop-in directory if it doesn't exist
 mkdir -p /etc/nftables.d
@@ -136,69 +136,43 @@ nft -f "$NFT_CONF"
 # Enable nftables service so rules persist across reboots
 systemctl enable nftables.service
 
-# --- Handle systemd-resolved vs dnsmasq conflict ---
-echo "[5/7] Configuring DNS resolution..."
-if systemctl is-active --quiet systemd-resolved; then
-    echo "  systemd-resolved is active. Configuring it to not listen on ${AP_INTERFACE}..."
+# --- Configure DNS hijacking via NetworkManager's dnsmasq ---
+echo "[5/6] Configuring DNS hijacking via NetworkManager dnsmasq..."
 
-    # Tell resolved not to manage DNS on the AP interface via NetworkManager
-    # This avoids port 53 conflicts with dnsmasq on the AP interface.
-    nmcli connection show --active 2>/dev/null | while IFS= read -r line; do
-        conn_name=$(echo "$line" | awk -F'  +' '{print $1}')
-        conn_dev=$(echo "$line" | awk -F'  +' '{print $NF}')
-        if [[ "$conn_dev" == "$AP_INTERFACE" && -n "$conn_name" ]]; then
-            echo "  Setting dns=none for NM connection '${conn_name}' on ${AP_INTERFACE}"
-            nmcli connection modify "$conn_name" ipv4.dns "" ipv4.ignore-auto-dns yes 2>/dev/null || true
-        fi
-    done
+# NetworkManager already runs its own dnsmasq instance for the hotspot
+# on 10.42.0.1:53. We add a drop-in config to make it resolve all
+# domains to the portal IP (DNS hijacking for captive portal detection).
+mkdir -p /etc/NetworkManager/dnsmasq-shared.d
 
-    # Create a resolved config that makes it ignore the AP interface
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/captive-portal.conf <<EOF
-# Allow dnsmasq to handle DNS on the AP interface
-[Resolve]
-DNSStubListenerExtra=
-EOF
-    systemctl restart systemd-resolved 2>/dev/null || true
-fi
-
-# --- Configure dnsmasq for DNS hijacking ---
-echo "[6/7] Configuring DNS hijacking via dnsmasq..."
-cat > /etc/dnsmasq.d/captive-portal.conf <<EOF
+cat > /etc/NetworkManager/dnsmasq-shared.d/captive-portal.conf <<EOF
 # Kiwix Captive Portal - DNS Override
 # Resolve ALL domains to the portal IP so captive portal detection triggers
 # and all HTTP requests land on our welcome page.
 
-# Only listen on the AP interface
-interface=${AP_INTERFACE}
-bind-interfaces
-
-# Don't read /etc/resolv.conf - we answer everything ourselves
-no-resolv
-
-# Don't use upstream DNS - this is an offline system
-no-poll
-
 # Answer all DNS queries with the portal IP
 address=/#/${PORTAL_IP}
-
-# Except: allow Kiwix server hostname to resolve normally (if used)
-# server=/kiwix.local/10.42.0.1
-
-# Disable DNSSEC since we're hijacking all DNS
-dnssec-no-timecheck
 
 # Set a short TTL so devices re-query quickly
 local-ttl=0
 EOF
 
-# Ensure dnsmasq doesn't conflict with resolved on port 53
-# by only binding to the AP interface (already set above)
-systemctl enable dnsmasq
-systemctl restart dnsmasq
+# Disable the standalone dnsmasq service if it was installed previously,
+# since NetworkManager runs its own dnsmasq for the hotspot
+if systemctl is-enabled dnsmasq.service 2>/dev/null | grep -q enabled; then
+    echo "  Disabling standalone dnsmasq (NetworkManager runs its own)..."
+    systemctl stop dnsmasq.service 2>/dev/null || true
+    systemctl disable dnsmasq.service 2>/dev/null || true
+fi
+
+# Restart NetworkManager to pick up the new dnsmasq config
+echo "  Restarting NetworkManager to apply DNS config..."
+systemctl restart NetworkManager
+
+# Wait briefly for NM to re-establish the hotspot and dnsmasq
+sleep 3
 
 # --- Start the portal ---
-echo "[7/7] Starting captive portal..."
+echo "[6/6] Starting captive portal..."
 systemctl start kiwix-portal.service
 
 echo ""

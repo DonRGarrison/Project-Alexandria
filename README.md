@@ -45,12 +45,11 @@ sudo bash setup_captive_portal.sh
 ```
 
 The setup script will:
-- Install dependencies (`nftables`, `dnsmasq`, `python3`)
+- Install dependencies (`nftables`, `python3`)
 - Install the portal server to `/opt/kiwix-portal/`
 - Create a systemd service (`kiwix-portal`)
 - Configure nftables to redirect HTTP/HTTPS to the portal
-- Configure dnsmasq to resolve all DNS to `10.42.0.1`
-- Handle systemd-resolved conflicts automatically
+- Configure NetworkManager's built-in dnsmasq to resolve all DNS to `10.42.0.1`
 
 ## Usage
 
